@@ -1,0 +1,144 @@
+import os
+import pandas as pd
+import fitz  # PyMuPDF
+import google.generativeai as genai
+import spacy
+from fuzzywuzzy import fuzz
+import time  # For adding delay between API requests
+
+# 1. Configure Gemini API
+genai.configure(api_key="AIzaSyDqpkIB27P7zySAIVtjUXIGLSyUn-NOSg8")
+model = genai.GenerativeModel("gemini-2.0-flash")
+
+# 2. Convert PDF to Text
+def convert_pdf_to_text(pdf_path):
+    text = ""
+    try:
+        with fitz.open(pdf_path) as doc:
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                text += page.get_text()
+        return text
+    except Exception as e:
+        return f"Error reading PDF: {e}"
+
+# 3. Read Excel file with context sentences
+def read_excel_sentences(excel_path, column_name="Question"):
+    df = pd.read_excel(excel_path)
+    sentences = df[column_name].dropna().tolist()
+    return sentences
+
+# 4. Extract keywords using SpaCy (nouns, proper nouns, numbers)
+nlp = spacy.load("en_core_web_sm")
+
+def extract_keywords(sentence):
+    doc = nlp(sentence)
+    keywords = [token.text for token in doc if token.pos_ in ["NOUN", "PROPN", "NUM"]]
+    return keywords
+
+# 5. Fuzzy search for relevant questions with filtering
+def find_relevant_questions(keywords, questions_excel_path, question_column="QUESTION1"):
+    df = pd.read_excel(questions_excel_path)
+    scored_questions = []
+
+    for _, row in df.iterrows():
+        question = str(row[question_column])
+        
+        match_scores = [
+            fuzz.partial_ratio(keyword.lower(), question.lower())
+            for keyword in keywords
+        ]
+        
+        match_count = sum(score > 70 for score in match_scores)
+        total_score = sum(match_scores)
+        
+        if match_count >= 3:
+            scored_questions.append((question, total_score))
+    
+    # Sort by score
+    scored_questions.sort(key=lambda x: x[1], reverse=True)
+    
+    # Take top 7
+    top_questions = scored_questions[:7]
+
+    # Print ranked questions with scores
+    print("\nRanked Questions:")
+    for q, score in top_questions:
+        print(f"  - {q} (Score: {score})")
+    
+    return [q for q, _ in top_questions]
+
+# 6. Query the LLM with questions and PDF context
+def ask_questions_with_context(questions, context, model):
+    results = []
+    for idx, q in enumerate(questions):
+        prompt = f"""You are a helpful assistant. Based on the following document content, answer the question clearly and concisely.
+
+Document Content:
+\"\"\" 
+{context} 
+\"\"\" 
+
+Question: {q}
+Answer:"""
+        try:
+            response = model.generate_content(prompt)
+            answer = response.text.strip()
+            results.append({"Question": q, "Answer": answer})
+            
+            # Adding a delay to avoid rate limit errors
+            if idx < len(questions) - 1:  # Avoid delay after the last question
+                print(f"Rate-limited... Waiting 10 seconds before next request.")
+                time.sleep(10)  # 10 seconds delay between requests
+            
+        except Exception as e:
+            results.append({"Question": q, "Answer": f"Error: {str(e)}"})
+    
+    return results
+
+# 7. Save results to CSV
+def save_to_csv(results, output_path="answers.csv"):
+    df = pd.DataFrame(results)
+    df.to_csv(output_path, index=False)
+    print(f"Answers saved to: {output_path}")
+
+# 8. Main Workflow
+def main():
+    # File paths
+    pdf_path = "C:/Users/Sreevidhya/Downloads/volex.pdf"
+    sentences_excel_path = "C://Users//Sreevidhya//Downloads//Validquestions.xls"
+    questions_excel_path = "volex _Metrics_test.xls"
+    output_csv_path = "answers_mapped3.csv"
+    
+    # Extract PDF text
+    print("Extracting text from PDF...")
+    pdf_text = convert_pdf_to_text(pdf_path)
+    
+    # Read sentences
+    print("Reading context sentences from Excel...")
+    sentences = read_excel_sentences(sentences_excel_path)
+    
+    all_results = []
+    for sentence in sentences:
+        print(f"\nProcessing sentence: {sentence}")
+        
+        # Extract keywords
+        keywords = extract_keywords(sentence)
+        print(f"Extracted Keywords: {keywords}")
+        
+        # Find and rank questions
+        relevant_questions = find_relevant_questions(keywords, questions_excel_path)
+        if not relevant_questions:
+            print("No relevant questions found.")
+            continue
+        
+        # Ask Gemini model
+        print(f"Asking {len(relevant_questions)} questions...")
+        result = ask_questions_with_context(relevant_questions, pdf_text, model)
+        all_results.extend(result)
+    
+    # Save all responses
+    save_to_csv(all_results, output_csv_path)
+
+if __name__ == "__main__":
+    main()
